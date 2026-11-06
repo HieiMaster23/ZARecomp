@@ -28,6 +28,7 @@
 #include <unistd.h>
 
 #include "../platform.h"
+#include "../stall_diag.h"
 #include "../rt.h"
 #include "../hle.h"  // (RT_ON_RESET)
 
@@ -179,6 +180,12 @@ static void wait_until(pthread_cond_t *cv, bool (*ready)(uint64_t), uint64_t arg
     uint64_t t0 = 0;
     bool warned = false;
     bool noted = what && !ready(arg);
+    StallSpan span = {0};
+    if (noted && atomic_load_explicit(&g_stall_diag_enabled, memory_order_relaxed)) {
+        if (!strcmp(what, "queue full")) stall_diag_begin(&span, STALL_QUEUE_ROOM, plat_now_ns());
+        else if (!strcmp(what, "present (the previous one to finish)"))
+            stall_diag_begin(&span, STALL_PRESENT_READY, plat_now_ns());
+    }
     if (noted) rq_watch(what, arg);
     while (!ready(arg)) {
         if (guest && g_rt_unwind) break;
@@ -200,6 +207,7 @@ static void wait_until(pthread_cond_t *cv, bool (*ready)(uint64_t), uint64_t arg
         }
     }
     if (noted) rq_watch(NULL, 0);
+    if (span.active) stall_diag_end(&span, plat_now_ns());
 }
 
 static bool has_room(uint64_t a) { (void)a; return q_enq - q_done < RQ_CAP; }

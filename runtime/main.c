@@ -304,6 +304,8 @@ int main(int argc, char **argv) {
     }
     rt_paths_init();  // the data root becomes the working directory (runtime/paths.h)
     launcher_log_open();
+    extern void stall_diag_init(void);
+    stall_diag_init();
     {   // Pokémon Legends Z-A (exefs/main build 7222e13ecf6adb32: 1.0.0, 8a1c86c437394b69: 2.0.0,
         // b1f12fd919eae86a: 2.0.2): the start screen sets its files up from the player's packages (zaimport). Started
         // without a log redirect (a double click): the log goes to logs/play.log (the previous one: logs/play-anterior.log).

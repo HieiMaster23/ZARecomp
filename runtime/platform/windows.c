@@ -1357,6 +1357,8 @@ bool plat_onedrive_synced(const char *dir) {
 
 // End the process at once, skipping DLL teardown (from an atexit handler, after flushing). Exit status 0.
 void plat_terminate(void) {  // (exit()'s last handler, runtime/nvn/vulkan/device.c: the others registered after
+    extern void stall_diag_shutdown(void);
+    stall_diag_shutdown();
     run_end();                 // ours never run - so the run's end is marked here)
     publish_log();
     TerminateProcess(GetCurrentProcess(), 0);
