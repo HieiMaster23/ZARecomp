@@ -6,6 +6,7 @@
 
 #include "hle.h"
 #include "kernel.h"
+#include "stall_diag.h"
 #ifdef _WIN32
 #include "platform/windows_threads.h"
 #endif
@@ -104,10 +105,31 @@ __thread uint64_t g_blocked_ns;
 static bool kwait(int64_t timeout_ns, const struct timespec *ts) {
     pthread_cond_t *cv = t_cur ? &t_cur->cond : &g_nothread_cond;
     uint64_t t0 = plat_now_ns();
+    StallSpan span = {0};
+    if (atomic_load_explicit(&g_stall_diag_enabled, memory_order_relaxed)) {
+        StallCause cause = STALL_EVENT_OTHER;
+        if (t_cur && t_cur->in_sync_wait) {
+            extern uint32_t vi_vsync_handle(void);
+            if (t_cur->sync_count == 1 && *(uint32_t *)(uintptr_t)t_cur->sync_handles == vi_vsync_handle())
+                cause = STALL_EVENT_VSYNC;
+        } else if (t_cur) {
+            if (t_cur->wait_kind == WAIT_MUTEX) cause = STALL_MUTEX;
+            else if (t_cur->wait_kind == WAIT_CONDVAR) cause = STALL_CONDVAR;
+            else if (t_cur->wait_kind == WAIT_ARBITER) cause = STALL_ARBITER;
+        }
+        stall_diag_begin(&span, cause, t0);
+    }
     bool r = true;
     if (timeout_ns < 0) pthread_cond_wait(cv, &g_klock);
     else r = pthread_cond_timedwait(cv, &g_klock, ts) == 0;
-    g_blocked_ns += plat_now_ns() - t0;
+    uint64_t t1 = plat_now_ns();
+    g_blocked_ns += t1 - t0;
+    if (span.active && span.cause == STALL_CONDVAR && t_cur &&
+        t_cur->diag_mutex_since >= t0 && t_cur->diag_mutex_since <= t1) {
+        stall_diag_end(&span, t_cur->diag_mutex_since);
+        stall_diag_begin(&span, STALL_MUTEX, t_cur->diag_mutex_since);
+    }
+    stall_diag_end(&span, t1);
     return r;
 }
 
@@ -575,6 +597,7 @@ static uint32_t svc_wait_process_wide_key(uint64_t mutex, uint64_t key, uint32_t
     bool traced = !kt_timed_key(key, timeout >= 0);
     if (traced) kt(KT_WAIT, key, mutex, kbefore, mbefore, rdw(mutex), 0xffffffffu);
     t->wait_kind = WAIT_CONDVAR;
+    t->diag_mutex_since = 0;
     t->wait_addr = key;
     t->wait_mutex = mutex;
     t->wait_tag = tag;
@@ -615,6 +638,8 @@ static void svc_signal_process_wide_key(uint64_t key, int32_t count) {
             wake(best);
         } else {
             best->wait_kind = WAIT_MUTEX;
+            if (atomic_load_explicit(&g_stall_diag_enabled, memory_order_relaxed))
+                best->diag_mutex_since = plat_now_ns();
             best->wait_addr = m;
         }
     }
@@ -871,8 +896,12 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         for (uint64_t end = plat_now_ns() + (uint64_t)ns, now; !g_rt_unwind && (now = plat_now_ns()) < end;) {
             uint64_t d = end - now < 50000000 ? end - now : 50000000;
             struct timespec ts = {(time_t)(d / 1000000000), (long)(d % 1000000000)};
+            StallSpan span = {0};
+            stall_diag_begin(&span, STALL_SLEEP, now);
             nanosleep(&ts, NULL);
-            g_blocked_ns += plat_now_ns() - now;
+            uint64_t t1 = plat_now_ns();
+            g_blocked_ns += t1 - now;
+            stall_diag_end(&span, t1);
         }
         break;
     }
